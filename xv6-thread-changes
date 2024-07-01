@@ -1,0 +1,252 @@
+Common subdirectories: ../../xv6-public/.vscode and xv6-thread/.vscode
+diff ../../xv6-public/Makefile xv6-thread/Makefile
+29a30
+> 	grade.o\
+183a185
+> 	_multithread\
+diff ../../xv6-public/defs.h xv6-thread/defs.h
+108a109
+> int             clone(void(*)(void*), void*, void*);
+121a123
+> void            sleep_proc_notify(void);
+190a193,195
+> 
+> // For grading
+> void log_sched(struct proc* p);
+Only in xv6-thread/: grade.c
+diff ../../xv6-public/mmu.h xv6-thread/mmu.h
+180a181,188
+> /**
+>  * Reference count for pgdir, as multiple threads may share the same pgdir. 
+> */
+> struct uvmdesc {
+>   int refcount; // -1 if the entry is invalid
+>   pde_t* pgdir;
+> };
+> 
+Only in xv6-thread/: multithread.c
+diff ../../xv6-public/proc.c xv6-thread/proc.c
+10,13c10
+< struct {
+<   struct spinlock lock;
+<   struct proc proc[NPROC];
+< } ptable;
+---
+> Ptable ptable;
+16a14,16
+> // Reference count for pgdir
+> extern struct uvmdesc uvmrefcount[NPROC];
+> 
+26a27,28
+>   for (int i = 0; i < NPROC; i++)
+>     uvmrefcount[i].refcount = -1;
+90a93,95
+>   p->nclone = 0;
+>   p->sleepticks = -1;
+>   p->chan = 0;
+223a229,294
+> extern struct uvmdesc *locate_uvmrefcount(pde_t* pgdir);
+> extern struct uvmdesc *allocate_uvmrefcount(pde_t* pgdir, int refcount);
+> 
+> int
+> clone(void (*fn)(void*), void* stack, void* arg)
+> {
+>   int i, pid;
+>   struct proc *np;
+>   struct proc *curproc = myproc();
+> 
+>   // Allocate process.
+>   if ((np = allocproc()) == 0) {
+>     return -1;
+>   }
+> 
+>   np->pgdir = curproc->pgdir;
+>   struct uvmdesc *uvmd;
+>   if ((uvmd = locate_uvmrefcount(curproc->pgdir)) != 0) {
+>     uvmd->refcount += 1;
+>   } else {
+>     uvmd = allocate_uvmrefcount(curproc->pgdir, 2);
+>   }
+>   np->chan = 0;
+>   np->sz = curproc->sz;
+>   np->parent = curproc;
+>   *np->tf = *curproc->tf;
+> 
+>   // Clear %eax so that fork returns 0 in the child.
+>   np->tf->eax = 0;
+> 
+>   uint *ustack = (uint *)stack;
+>   ustack[-1] = (uint)arg;
+>   ustack[-2] = 0xffffffffu;
+> 
+>   np->tf->esp = (uint)(ustack - 2);
+>   np->tf->eip = (uint)fn;
+> 
+>   for (i = 0; i < NOFILE; i++)
+>     if (curproc->ofile[i]) np->ofile[i] = filedup(curproc->ofile[i]);
+>   np->cwd = idup(curproc->cwd);
+> 
+>   // Name the new thread with ID as suffix
+>   curproc->nclone++;
+>   safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+>   i = strlen(np->name);
+>   int threadnum = curproc->nclone;
+>   while (threadnum != 0 && i < MAXPROCNAMELEN - 1) {
+>     np->name[i] = '0' + threadnum % 10;
+>     threadnum /= 10;
+>     i++;
+>   }
+>   np->name[i] = '\0';
+> 
+>   np->nclone++;
+> 
+>   pid = np->pid;
+> 
+>   acquire(&ptable.lock);
+> 
+>   np->state = RUNNABLE;
+> 
+>   release(&ptable.lock);
+> 
+>   return pid;
+> }
+> 
+454,459c525,526
+< //PAGEBREAK!
+< // Wake up all processes sleeping on chan.
+< // The ptable lock must be held.
+< static void
+< wakeup1(void *chan)
+< {
+---
+> static void 
+> wakeup1(void *chan) {
+472a540,553
+>   release(&ptable.lock);
+> }
+> 
+> void
+> sleep_proc_notify() {
+>   struct proc *p;
+>   acquire(&ptable.lock);
+>   for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+>     if (p->state == SLEEPING && p->chan == &ticks) {
+>       if (p->sleepticks == 0)
+>         p->state = RUNNABLE;
+>       else
+>         p->sleepticks -= 1;
+>     }
+diff ../../xv6-public/proc.h xv6-thread/proc.h
+0a1,6
+> #ifndef PROC
+> #define PROC
+> 
+> #define MAXPROCNAMELEN 16
+> #include "spinlock.h"
+> 
+51c57,59
+<   char name[16];               // Process name (debugging)
+---
+>   char name[MAXPROCNAMELEN];               // Process name (debugging)
+>   int nclone;                  // Number of clone calls on this proc (for grading)
+>   int sleepticks;              // Number of ticks left the process should sleep for
+52a61,64
+> typedef struct {
+>   struct spinlock lock;
+>   struct proc proc[NPROC];
+> } Ptable;
+58a71,72
+> 
+> #endif
+\ No newline at end of file
+diff ../../xv6-public/spinlock.h xv6-thread/spinlock.h
+0a1,3
+> #ifndef __SPINKLOCK__
+> #define __SPINKLOCK__
+> 
+11a15
+> #endif
+diff ../../xv6-public/syscall.c xv6-thread/syscall.c
+105a106
+> extern int sys_clone(void);
+128a130
+> [SYS_clone]   sys_clone,
+diff ../../xv6-public/syscall.h xv6-thread/syscall.h
+22a23
+> #define SYS_clone  22
+diff ../../xv6-public/sysproc.c xv6-thread/sysproc.c
+15a16,24
+> int sys_clone(void)
+> {
+>   int fn, stack, arg;
+>   argint(0, &fn);
+>   argint(1, &stack);
+>   argint(2, &arg);
+>   return clone((void (*)(void*))fn, (void*)stack, (void*)arg);
+> }
+> 
+66a76,79
+>   if (n == 0) {
+>     yield();
+>     return 0;
+>   }
+68a82
+>   myproc()->sleepticks = n;
+75a90
+>   myproc()->sleepticks = -1;
+diff ../../xv6-public/trap.c xv6-thread/trap.c
+54c54,56
+<       wakeup(&ticks);
+---
+>       // Instead of waking up all sleeping processes, 
+>       // only wake up the ones with no sleep time left. 
+>       sleep_proc_notify();
+diff ../../xv6-public/user.h xv6-thread/user.h
+25a26
+> int clone(void (*)(void*), void*, void*);
+diff ../../xv6-public/usys.S xv6-thread/usys.S
+40a32
+> SYSCALL(clone)
+diff ../../xv6-public/vm.c xv6-thread/vm.c
+12a13,36
+> // Reference count for pgdir
+> struct uvmdesc uvmrefcount[NPROC];
+> 
+> struct uvmdesc *locate_uvmrefcount(pde_t* pgdir) {
+>   for (int i = 0; i < NPROC; i++) {
+>     if (uvmrefcount[i].refcount != -1 && uvmrefcount[i].pgdir == pgdir) {
+>       return &uvmrefcount[i];
+>     }
+>   }
+> 
+>   return 0;
+> }
+> 
+> struct uvmdesc *allocate_uvmrefcount(pde_t* pgdir, int refcount) {
+>   for (int i = 0; i < NPROC; i++) {
+>     if (uvmrefcount[i].refcount == -1) {
+>       uvmrefcount[i].refcount = refcount;
+>       uvmrefcount[i].pgdir = pgdir;
+>       return &uvmrefcount[i];
+>     }
+>   }
+>   return 0;
+> }
+> 
+165a190,192
+>   // Used for grading
+>   log_sched(p);
+> 
+285a313,324
+>   struct uvmdesc *uvmd;
+>   // Only free the vm if reference count for its pgdir reaches 0. 
+>   if ((uvmd = locate_uvmrefcount(pgdir)) != 0) {
+>     if (uvmd->refcount < 1)
+>       panic("freevm: invalid uvm refcount");
+>     --uvmd->refcount;
+>     if (uvmd->refcount != 0)
+>       return;
+>     else
+>       uvmd->refcount = -1;
+>   }
+> 
